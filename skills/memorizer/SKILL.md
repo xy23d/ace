@@ -1,147 +1,175 @@
 ---
 name: memorizer
 description: >
-  セッション管理スキル。会話のサマリーをファイルに保存・切り替え・一覧表示する。
-  `/memorizer` で初期化、`/memorizer switch <id>` で切り替え、
-  `/memorizer save` で手動保存、`/memorizer list` で一覧表示。
+  コンテキスト管理スキル。作業コンテキストをトピック別ファイルに保存・ロード・一覧表示する。
+  `/memorizer` で初期化、`/memorizer save [topic]` で保存、
+  `/memorizer load <topic...>` でロード、`/memorizer list` で一覧。
 ---
 
-# Memorizer: セッション管理
+# Memorizer: コンテキスト管理
+
+## 設計原則
+
+**1トピック = 1つの具体的な問題・機能・目的**
+
+トピックは最小単位で管理し、必要なものを組み合わせてロードする。
+コードのモジュールと同じ考え方。
+
+```
+✗ auth                     ← 広すぎ
+✓ auth-jwt-refresh         ← リフレッシュトークン設計
+✓ auth-provider-selection  ← プロバイダー比較・選定
+✓ auth-session-storage     ← セッション保存方式
+```
 
 ## データ構造
 
-- `memory/conversations/{id}.md` — セッションの最新サマリー（上書き）。通常はこちらを参照する
-- `memory/conversations/{id}/log.md` — 時系列の詳細ログ（追記のみ）。過去の経緯をすべて確認したい場合のみ読み込む
-- `memory/current_session.md` — 現在のセッションIDを記録するファイル
-- `memory/mapping.md` — 全セッションのインデックス（ID・日付・トピック・サマリー）
+```
+memory/contexts/
+  index.md            — 全トピックの1行サマリー（list用インデックス）
+  {topic}.md          — 現在の状態サマリー（上書き、常に小さく保つ）
+  {topic}/
+    context-log.md    — 現在有効な制約・決定の一覧（更新）
+```
 
-## セッションIDの仕様
+### index.md のフォーマット
 
-- 英小文字・数字を使った **8文字** のランダム文字列（例：`f3k9m2p8`）
-- 生成後に `memory/conversations/` に同名ファイルが存在しないか確認し、衝突する場合は再生成する
+```markdown
+| topic | updated |
+|-------|---------|
+| {topic} | {date} |
+```
+
+### {topic}.md のフォーマット
+
+```markdown
+---
+topic: {topic}
+updated: {date}
+depends_on:
+  - {topic-a}
+  - {topic-b}
+---
+
+## 現在の状態
+（1〜3行）
+
+## 決定事項
+- ...
+
+## 次のアクション
+- ...
+```
+
+`depends_on` は省略可。依存トピックのロード時にそのコンテキストも合わせて読み込まれる。
+
+**サイズルール：** 各セクション最大5項目。完結した決定はcontext-logに移してサマリーから削除する。
+
+### context-log.md のフォーマット
+
+```markdown
+## {date} {タイトル}
+{調査・決定の内容}
+→ {結果・理由・影響}
+```
+
+---
+
+## context-log に記録する基準
+
+**記録する（プロジェクト内側にしか存在しない情報）:**
+- このプロジェクト固有の制約（予算・チーム・既存インフラ）
+- 選択肢を比較してXを除外した理由
+- 試して失敗したこと・その原因
+- ステークホルダーの意思決定とその背景
+- プロジェクト内で発見した仕様・挙動の特殊性
+
+**記録しない（プロジェクト外側にある再検索可能な情報）:**
+- 公開ドキュメントに書いてある情報（インストール方法・APIの使い方）
+- 一般的なベストプラクティス
+- Stack Overflow等で再現できるエラーの解決策
 
 ---
 
 ## `/memorizer`（引数なし）— 初期化
 
-以下を順番に実行する。
+### Step 1 — index.md の確認
 
-### Step 0 — 現在セッションの保存
+`memory/contexts/index.md` を Read する。
 
-`memory/current_session.md` が存在する場合、`/memorizer save` の手順と同じ内容で現在のセッションを保存する。
-ただし、前回の保存以降にやりとりがない場合はスキップする。
+### Step 2 — 宣言
 
-### Step 1 — 既存cronの削除
-
-CronList で実行中のサマリー保存ジョブを確認し、すべて CronDelete で削除する。
-
-### Step 2 — セッションID生成
-
-新しいセッションIDを生成して `memory/conversations/` に衝突がないことを確認する。
-
-### Step 3 — current_session.md の書き込み
-
-以下の内容で `memory/current_session.md` を上書きする：
+`index.md` が存在してトピックがある場合、一覧を表示する：
 
 ```
-{id}
+利用可能なコンテキスト:
+- {topic}  ({updated})
 ```
 
-### Step 4 — cronの起動
-
-CronCreate で以下のジョブを作成する：
-- cron: `*/30 * * * *`
-- prompt: `会話のサマリーをmemory/conversations/{id}.mdに保存して、memory/conversations/{id}/log.mdに今回分を追記して、memory/mapping.mdにそのIDがなければ追記して, ただし、前回の保存以降にやりとりがない場合はスキップする`
-- recurring: true
-
-### Step 5 — 宣言
-
-「このセッションのID: `{id}`」と宣言する。
-
-なお、コード等のアウトプットがある場合のみ `outputs/{id}/` に出力する。
+`index.md` が存在しない、またはトピックがない場合は「コンテキストなし」と表示する。
 
 ---
 
-## サマリー保存の注意
+## `/memorizer save [topic]` — 保存
 
-保存対象は会話の実質的な内容（技術的なやりとり・作業内容）のみ。
-`/memorizer` の操作（list・switch・save・初期化など）自体はサマリーに含めない。
+### Step 1 — トピック決定
 
----
-
-## `/memorizer save` — 手動保存
-
-### Step 1 — 現在IDの取得
-
-`memory/current_session.md` を Read して現在のセッションIDを取得する。
+`topic` が指定されていない場合、会話の内容からトピック名を推定する（英小文字・ハイフン区切り、例: `auth-refactor`）。
+既存トピックへの追記か新規作成かを判断する。
 
 ### Step 2 — サマリー上書き
 
-会話の内容を要約して `memory/conversations/{id}.md` に**上書き**する。
+現在の作業内容を要約して `memory/contexts/{topic}.md` を上書きする。
+完結した決定はサマリーから削除し、context-logに移す（サマリーを小さく保つ）。
 
-### Step 3 — ログ追記
+### Step 3 — index.md 更新
 
-`memory/conversations/{id}/log.md` に以下の形式で**追記**する：
+`memory/contexts/index.md` の該当トピック行を更新する（存在しなければ追加）。
+`現在の状態` セクションの1行目を使う。
 
-```
-## {datetime}
+### Step 4 — context-log 更新
 
-{今回の保存範囲のやりとりの詳細サマリー}
-```
-
-### Step 4 — mapping更新
-
-`memory/mapping.md` にそのIDが存在しなければ1行追加する。
-
-フォーマット：`| {id} | {date} | {topic} | {summary} |`
+`memory/contexts/{topic}/context-log.md` を以下のルールで更新する：
+- 今回の会話で「記録する基準」に該当する内容があれば追記する
+- 解決済み・無効になったエントリは削除する
+- 該当する内容がなければスキップする
 
 完了を報告する。
 
 ---
 
-## `/memorizer switch <id>` — セッション切り替え
+## `/memorizer load <topic...>` — ロード
+
+複数トピックを同時にロードできる。
+
+```
+/memorizer load ckeditor-html-embed ckeditor-license
+```
 
 ### Step 1 — ファイル確認
 
-`memory/conversations/{id}.md` が存在するか確認する。
-存在しない場合は「セッション `{id}` が見つかりません」と伝えて終了。
+指定された各トピックについて `memory/contexts/{topic}.md` が存在するか確認する。
+存在しないトピックは「コンテキスト `{topic}` が見つかりません」と報告してスキップ。
 
-### Step 2 — 現在セッションの保存
+### Step 2 — 依存関係の解決
 
-`/memorizer save` の手順と同じ内容で、現在のセッションを保存する。
+各トピックの `depends_on` を確認し、依存トピックを再帰的にロード対象に追加する。
+循環依存が検出された場合は警告して該当ループをスキップする。
+ロード順は依存元 → 依存先の順（依存先を先に読む）。
 
-### Step 3 — current_session.md の更新
+### Step 3 — ロードと表示
 
-`memory/current_session.md` を指定された `{id}` で上書きする。
-
-### Step 4 — cronの更新
-
-CronList で現在のジョブを CronDelete で削除し、新しいIDで CronCreate する（初期化のStep 4と同じ要領）。
-
-### Step 5 — ロードと宣言
-
-`memory/conversations/{id}.md` を Read して内容を把握する。
-
-「このセッションのIDを `{id}` に切り替えました」と宣言し、ロードしたセッションの概要を3〜5行で表示する。
+解決済みの全トピックの `{topic}.md` を Read する。`{topic}/context-log.md` はこの時点では読まない（ユーザーが必要と判断したタイミングで読む）。
+全トピックの内容をまとめて3〜5行で要約して表示する。ロードしたトピック一覧も表示する。
 
 ---
 
 ## `/memorizer list` — 一覧表示
 
-`memory/mapping.md` を Read して、以下の形式で1セッション1行で表示する：
+`memory/contexts/index.md` を Read して以下の形式で表示する：
 
 ```
-`{id}`  {date}  {topic}
-  {summary}
+{topic}  ({updated})
 ```
 
----
-
-## `/memorizer current` — 現在のセッションID表示
-
-`memory/current_session.md` を Read して現在のセッションIDを表示する。
-
-出力形式：
-```
-現在のセッションID: `{id}`
-```
+`index.md` が存在しない場合は「インデックスがありません。`/memorizer save` で作成してください。」と表示する。
