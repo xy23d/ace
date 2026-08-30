@@ -25,8 +25,6 @@ if [ ! -f "$GOAL_FILE" ]; then
   exit 1
 fi
 
-WORKTREE="$(readlink -f "$WORKTREE")"
-GOAL_FILE="$(readlink -f "$GOAL_FILE")"
 mkdir -p "$INPUTS_DIR"
 
 TASK_FILE="$(mktemp "$INPUTS_DIR/review-XXXXXX.md")"
@@ -42,4 +40,4 @@ goal: $GOAL_FILE
 target: $WORKTREE $DIFF_RANGE
 EOF
 
-exec bash "$SCRIPT_DIR/claude-exec.sh" review "$WORKTREE" "$TASK_NAME" "$INPUTS_DIR"
+exec bash "$SCRIPT_DIR/claude-review-agent-exec.sh" "$WORKTREE" "$TASK_NAME" "$INPUTS_DIR"
